@@ -1,8 +1,8 @@
 name          = "fs"
-version       = "1.0.0"
+version       = "1.1.0"
 license       = "MIT"
 description   = "File system operations beyond opening/reading a single file. Path inspection: `fs.exists(p)` — anything (file/dir/symlink) at p `fs.is_file(p)` / `fs.is_dir(p)` `fs.size(p)` — bytes (-1 if not sta"
 repository    = "github.com/AlexVachon/quirk-fs"
-quirk-version = ">=1.4.0"
+quirk-version = ">=7.11.1"
 
 [deps]

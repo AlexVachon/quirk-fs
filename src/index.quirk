@@ -18,6 +18,7 @@ Mutation:
   `fs.mkdir(p, parents=false)` — create directory, optionally with intermediates
   `fs.rmdir(p)`                — remove an empty directory
   `fs.remove(p)`               — delete a file
+  `fs.remove_tree(p)`          — delete a directory and everything in it
   `fs.rename(from, to)`        — move / rename
 
 Listing & navigation:
@@ -96,6 +97,20 @@ extern define remove_raw(path: String) -> Int
 define remove(path: String) -> void {
     if remove_raw(path) != 0 {
         throw IOError("fs.remove failed for '" + path + "'")
+    }
+}
+
+---
+Delete `path` and everything under it, like `rm -rf`. A file is simply
+deleted; symlinks are removed themselves, never followed.
+@throws IOError if `path` doesn't exist or anything in it can't be removed.
+@example
+fs.remove_tree("build/tmp")
+---
+extern define remove_tree_raw(path: String) -> Int
+define remove_tree(path: String) -> void {
+    if remove_tree_raw(path) != 0 {
+        throw IOError("fs.remove_tree failed for '" + path + "'")
     }
 }
 

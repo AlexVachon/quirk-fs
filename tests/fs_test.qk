@@ -1,0 +1,100 @@
+// Tests for the fs package. Run with `quirk test`. Each test gets a fresh
+// scratch directory.
+use fs
+from io.file use { File }
+
+base := "/tmp/quirk_fs_pkg_test"
+
+define setup() -> void {
+    if fs.exists(base) { fs.remove_tree(base) }
+    fs.mkdir(base)
+}
+
+define teardown() -> void {
+    if fs.exists(base) { fs.remove_tree(base) }
+}
+
+define write(path: String, text: String) -> void {
+    with File(path, "w") as f {
+        f.write(text)
+    }
+}
+
+define test_path_helpers() -> void {
+    assert fs.join("a", "b") == "a/b"
+    assert fs.basename("/x/y/file.txt") == "file.txt"
+    assert fs.dirname("/x/y/file.txt") == "/x/y"
+    assert fs.extname("archive.tar.gz") == ".gz"
+}
+
+define test_mkdir_and_is_dir() -> void {
+    d := fs.join(base, "sub")
+    assert not fs.exists(d)
+    fs.mkdir(d)
+    assert fs.is_dir(d)
+    assert not fs.is_file(d)
+}
+
+define test_mkdir_parents() -> void {
+    deep := fs.join(base, "a/b/c")
+    fs.mkdir(deep, true)
+    assert fs.is_dir(deep)
+}
+
+define test_file_size_and_remove() -> void {
+    p := fs.join(base, "hello.txt")
+    write(p, "hello")
+    assert fs.is_file(p)
+    assert fs.size(p) == 5
+    fs.remove(p)
+    assert not fs.exists(p)
+}
+
+define test_rename() -> void {
+    src := fs.join(base, "old.txt")
+    dst := fs.join(base, "new.txt")
+    write(src, "x")
+    fs.rename(src, dst)
+    assert not fs.exists(src)
+    assert fs.exists(dst)
+}
+
+define test_list_dir() -> void {
+    write(fs.join(base, "one.txt"), "1")
+    write(fs.join(base, "two.txt"), "2")
+    names := fs.list_dir(base).sort()
+    assert names == ["one.txt", "two.txt"]
+}
+
+define test_rmdir_refuses_a_non_empty_directory() -> void {
+    d := fs.join(base, "full")
+    fs.mkdir(d)
+    write(fs.join(d, "f.txt"), "x")
+    failed := false
+    try {
+        fs.rmdir(d)
+    } catch (e: IOError) {
+        failed = true
+    }
+    assert failed
+    assert fs.is_dir(d)
+}
+
+define test_remove_tree() -> void {
+    root := fs.join(base, "tree")
+    fs.mkdir(fs.join(root, "a/b"), true)
+    write(fs.join(root, "a/b/f.txt"), "x")
+    write(fs.join(root, "top.txt"), "y")
+    fs.remove_tree(root)
+    assert not fs.exists(root)
+}
+
+define test_remove_tree_of_missing_path_throws() -> void {
+    failed := false
+    try {
+        fs.remove_tree(fs.join(base, "nope"))
+    } catch (e: IOError) {
+        failed = true
+    }
+    assert failed
+}
