@@ -3,7 +3,7 @@ File system operations beyond opening/reading a single file.
 
 Path inspection:
   `fs.exists(p)` — anything (file/dir/symlink) at p
-  `fs.is_file(p)` / `fs.is_dir(p)`
+  `fs.is_file(p)` / `fs.is_dir(p)` / `fs.is_link(p)`
   `fs.size(p)` — bytes (-1 if not stat-able)
   `fs.mtime(p)` — last-modified, Unix epoch seconds (-1 on failure)
 
@@ -13,6 +13,7 @@ Path manipulation (pure-Quirk, no I/O):
   `fs.dirname(p)`        — everything before the final component
   `fs.extname(p)`        — extension including the dot, or ""
   `fs.split_ext(p)`      — (stem, ext) tuple
+  `fs.absolute(p)`       — canonical absolute path (resolves symlinks, ..)
 
 Mutation:
   `fs.mkdir(p, parents=false)` — create directory, optionally with intermediates
@@ -20,11 +21,25 @@ Mutation:
   `fs.remove(p)`               — delete a file
   `fs.remove_tree(p)`          — delete a directory and everything in it
   `fs.rename(from, to)`        — move / rename
+  `fs.copy(src, dst)`          — copy a file (into `dst` if it's a directory)
+  `fs.copy_tree(src, dst)`     — copy a directory and everything in it
+
+Whole files:
+  `fs.read_text(p)`               — the file's contents
+  `fs.write_text(p, text)`        — replace / create
+  `fs.append_text(p, text)`       — append / create
 
 Listing & navigation:
   `fs.list_dir(p)`  — non-recursive list of entries (no `.` / `..`)
   `fs.cwd()`        — current working directory
   `fs.chdir(p)`     — change current directory
+  `fs.walk(root)`   — every file under root, recursively, sorted
+  `fs.glob(pat)`    — paths matching `*.qk`, `src/**/*_test.qk`, ...
+  `fs.matches(pat, name)` — does one name match a `*` / `?` / `[a-z]` pattern
+
+Temporary files:
+  `fs.temp_dir()` / `fs.temp_file(suffix=".json")` — new, private, unique
+  `fs.temp_root()`  — where they go ($TMPDIR, else /tmp)
 
 @example
 if not fs.is_dir("build") {
@@ -32,13 +47,17 @@ if not fs.is_dir("build") {
 }
 for entry in fs.list_dir(".") {
     if fs.is_file(entry) {
-        print(entry, "->", fs.size(entry), "bytes")
+        print(entry + " -> " + fs.size(entry).str() + " bytes")
     }
+}
+@example
+for path in fs.glob("src/**/*.qk") {
+    print(path + ": " + fs.read_text(path).split("\n").length().str() + " lines")
 }
 ---
 from typing.primitives.string use { String }
 from typing.collections.list use { List }
-from typing.exceptions.types use { IOError }
+from typing.exceptions.types use { IOError, FileNotFoundError }
 
 // ===== Path inspection (extern, hits stat) =====
 
@@ -258,4 +277,272 @@ define split_ext(path: String) -> Tuple {
     }
     stem := path.substring(0, path.length() - ext.length())
     return (stem, ext)
+}
+
+// ===== Links & absolute paths =====
+
+--- True if `path` is itself a symbolic link (whatever it points to). ---
+extern define is_link(path: String) -> Bool
+
+extern define realpath(path: String) -> String
+
+---
+The absolute, canonical form of `path`: symlinks, `.` and `..` resolved.
+@throws FileNotFoundError if `path` doesn't exist.
+@example fs.absolute("../notes.txt")   // "/home/me/notes.txt"
+---
+define absolute(path: String) -> String {
+    p := realpath(path)
+    if p.length() == 0 {
+        throw FileNotFoundError("fs.absolute: no such file or directory: '" + path + "'")
+    }
+    return p
+}
+
+// ===== Walking & globbing =====
+
+extern define walk_raw(root: String, flags: Int, max_depth: Int) -> List
+
+---
+Every path under directory `root` (not `root` itself), depth first and
+sorted by name within each directory, as `root/...` strings.
+@param dirs         also list directories (each before its contents)
+@param files        list files (and other non-directories)
+@param hidden       include names starting with `.` (and descend into them)
+@param follow_links descend into symlinked directories
+@param max_depth    how deep to go: 0 = only `root`'s own entries, -1 = all
+@example
+for path in fs.walk("src") {
+    if fs.extname(path) == ".qk" { print(path) }
+}
+---
+define walk(root: String, dirs: Bool = false, files: Bool = true, hidden: Bool = false, follow_links: Bool = false, max_depth: Int = -1) -> List {
+    flags := 0
+    if files { flags = flags + 1 }
+    if dirs { flags = flags + 2 }
+    if follow_links { flags = flags + 4 }
+    if hidden { flags = flags + 8 }
+    return walk_raw(root, flags, max_depth)
+}
+
+extern define match_raw(pattern: String, name: String, hidden: Int) -> Bool
+
+---
+True if file name `name` matches the shell-style `pattern`: `*` (any
+run of characters), `?` (one character), `[abc]` / `[a-z]` / `[!x]`
+(one character from a set). A leading `.` must be matched explicitly
+unless `hidden` is true. Matches a single name, not a path — see `glob`.
+@example fs.matches("*.qk", "main.qk")    // true
+---
+define matches(pattern: String, name: String, hidden: Bool = false) -> Bool {
+    h := 0
+    if hidden { h = 1 }
+    return match_raw(pattern, name, h)
+}
+
+define _has_wildcard(s: String) -> Bool {
+    return s.contains("*") or s.contains("?") or s.contains("[")
+}
+
+define _glob_join(base: String, name: String) -> String {
+    if base.length() == 0 { return name }
+    if base == "/" { return "/" + name }
+    return base + "/" + name
+}
+
+---
+Paths matching `pattern`, sorted. Each `/`-separated part of the pattern
+is matched against one level of the tree (see `matches`); a part that is
+exactly `**` matches any number of directories, including none. Names
+starting with `.` only match when the pattern part starts with `.`, or
+with `hidden=true`. Relative patterns give paths relative to the
+current directory.
+@example fs.glob("*.qk")              // ["main.qk", "util.qk"]
+@example fs.glob("src/**/*_test.qk")  // test files at any depth under src
+---
+define glob(pattern: String, hidden: Bool = false) -> List {
+    parts := []
+    for p in pattern.split("/") {
+        s: String = p
+        if s.length() > 0 and s != "." { parts.append(s) }
+    }
+    bases := [""]
+    if pattern.startswith("/") { bases = ["/"] }
+    h := 0
+    if hidden { h = 1 }
+    walk_flags := 2
+    if hidden { walk_flags = walk_flags + 8 }
+    n := parts.length()
+    i := 0
+    for part in parts {
+        seg: String = part
+        is_last := i == n - 1
+        next := []
+        for b in bases {
+            base: String = b
+            dir := base
+            if dir.length() == 0 { dir = "." }
+            if seg == "**" {
+                next.append(base)
+                for sub in walk_raw(dir, walk_flags, -1) {
+                    found: String = sub
+                    if base.length() == 0 { found = found.substring(2, found.length()) }
+                    next.append(found)
+                }
+            } elif _has_wildcard(seg) {
+                names := list_dir(dir)
+                names.sort()
+                for nm in names {
+                    name: String = nm
+                    if match_raw(seg, name, h) {
+                        cand := _glob_join(base, name)
+                        if is_last or is_dir(cand) { next.append(cand) }
+                    }
+                }
+            } else {
+                cand := _glob_join(base, seg)
+                if (is_last and exists(cand)) or is_dir(cand) { next.append(cand) }
+            }
+        }
+        bases = next
+        i = i + 1
+    }
+    // `**` can reach a path more than one way (`a/**/b/**`): keep the first.
+    seen := {}
+    out := []
+    for b in bases {
+        path: String = b
+        if path.length() > 0 and not seen.has(path) {
+            seen[path] = true
+            out.append(path)
+        }
+    }
+    out.sort()
+    return out
+}
+
+// ===== Temporary files =====
+
+--- The directory temporary files go in: `$TMPDIR`, else `/tmp`. ---
+extern define temp_root() -> String
+
+extern define temp_dir_raw(dir: String, prefix: String) -> String
+extern define temp_file_raw(dir: String, prefix: String, suffix: String) -> String
+
+---
+Create a new, empty, private (owner-only) directory with a unique name
+like `/tmp/quirk-a8Xk2p` and return its path. It's yours to delete
+(`fs.remove_tree`).
+@param prefix start of the directory name
+@param dir    where to create it ("" = `fs.temp_root()`)
+@throws IOError if it can't be created.
+@example
+work := fs.temp_dir(prefix="build-")
+// ...
+fs.remove_tree(work)
+---
+define temp_dir(prefix: String = "quirk-", dir: String = "") -> String {
+    p := temp_dir_raw(dir, prefix)
+    if p.length() == 0 { throw IOError("fs.temp_dir: can't create a directory in '" + _temp_where(dir) + "'") }
+    return p
+}
+
+---
+Create a new, empty, private (owner-only) file with a unique name like
+`/tmp/quirk-a8Xk2p.json` and return its path. It's yours to delete
+(`fs.remove`).
+@param prefix start of the file name
+@param suffix end of the file name (e.g. ".json")
+@param dir    where to create it ("" = `fs.temp_root()`)
+@throws IOError if it can't be created.
+---
+define temp_file(prefix: String = "quirk-", suffix: String = "", dir: String = "") -> String {
+    p := temp_file_raw(dir, prefix, suffix)
+    if p.length() == 0 { throw IOError("fs.temp_file: can't create a file in '" + _temp_where(dir) + "'") }
+    return p
+}
+
+define _temp_where(dir: String) -> String {
+    if dir.length() == 0 { return temp_root() }
+    return dir
+}
+
+// ===== Copying =====
+
+extern define copy_raw(src: String, dst: String) -> Int
+
+---
+Copy file `src` to `dst`, keeping its permissions. If `dst` is an
+existing directory, the copy goes inside it under the same name. An
+existing file at the destination is replaced. Returns the path written.
+@throws FileNotFoundError if `src` doesn't exist; IOError otherwise.
+@example fs.copy("config.toml", "backup/")   // "backup/config.toml"
+---
+define copy(src: String, dst: String) -> String {
+    if not exists(src) { throw FileNotFoundError("fs.copy: no such file: '" + src + "'") }
+    if is_dir(src) { throw IOError("fs.copy: '" + src + "' is a directory (use fs.copy_tree)") }
+    target := dst
+    if is_dir(dst) { target = join(dst, basename(src)) }
+    if copy_raw(src, target) != 0 {
+        throw IOError("fs.copy '" + src + "' -> '" + target + "' failed")
+    }
+    return target
+}
+
+---
+Copy directory `src` and everything in it (hidden files included) to
+`dst`, which must not exist yet. Symlinks are copied as the files they
+point to.
+@throws FileNotFoundError if `src` isn't a directory; IOError if `dst`
+        exists or anything can't be copied.
+@example fs.copy_tree("assets", "dist/assets")
+---
+define copy_tree(src: String, dst: String) -> void {
+    if not is_dir(src) { throw FileNotFoundError("fs.copy_tree: no such directory: '" + src + "'") }
+    if exists(dst) { throw IOError("fs.copy_tree: '" + dst + "' already exists") }
+    mkdir(dst, true)
+    prefix := src.length()
+    if not src.endswith("/") { prefix = prefix + 1 }
+    for entry in walk_raw(src, 1 + 2 + 8, -1) {
+        path: String = entry
+        target := join(dst, path.substring(prefix, path.length()))
+        if is_dir(path) {
+            mkdir(target, true)
+        } elif copy_raw(path, target) != 0 {
+            throw IOError("fs.copy_tree: copying '" + path + "' failed")
+        }
+    }
+}
+
+// ===== Whole-file read / write =====
+
+extern define read_text_raw(path: String) -> String
+extern define write_text_raw(path: String, data: String, append: Int) -> Int
+
+---
+The whole contents of file `path`.
+@throws FileNotFoundError if it doesn't exist; IOError if it can't be read.
+@example config := fs.read_text("config.toml")
+---
+define read_text(path: String) -> String {
+    if is_dir(path) { throw IOError("fs.read_text: '" + path + "' is a directory") }
+    s := read_text_raw(path)
+    if s == null {
+        if not exists(path) { throw FileNotFoundError("fs.read_text: no such file: '" + path + "'") }
+        throw IOError("fs.read_text: can't read '" + path + "'")
+    }
+    return s
+}
+
+---
+Write `text` to file `path`, replacing what was there (creating it if
+needed). @throws IOError on failure.
+---
+define write_text(path: String, text: String) -> void {
+    if write_text_raw(path, text, 0) != 0 { throw IOError("fs.write_text: can't write '" + path + "'") }
+}
+
+--- Append `text` to file `path`, creating it if needed. @throws IOError on failure. ---
+define append_text(path: String, text: String) -> void {
+    if write_text_raw(path, text, 1) != 0 { throw IOError("fs.append_text: can't write '" + path + "'") }
 }
